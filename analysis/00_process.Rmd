@@ -1,0 +1,156 @@
+---
+title: "Quick Processing"
+output: 
+  html_notebook:
+    theme: flatly
+    toc: true
+    toc_float: true
+---
+
+# What is this?
+E11.5 (or E11?) mouse RPE
+
+Run on 10x v3 platform
+
+This is a trial run to determine whether Elan can process mouse tissue at this very early time point.
+
+```{r, fig.width=15, fig.height=15}
+library(tidyverse)
+library(Seurat)
+
+
+seurat.data  <- Read10X(data.dir = '~/data/sc_mouse_OFC_e11/aggr/outs/count/filtered_feature_bc_matrix')
+seurat <- CreateSeuratObject(counts = seurat.data, project = "e11_mouse_eye_cup", min.cells = 3, min.features = 200)
+seurat[["percent.mt"]] <- PercentageFeatureSet(seurat, pattern = "^mt-")
+
+seurat@meta.data$replicate <- str_extract(colnames(seurat), '\\d')
+seurat@meta.data$orig.ident <- paste0(seurat@meta.data$orig.ident, '__', seurat@meta.data$replicate)
+Idents(seurat) <- seurat@meta.data$orig.ident
+```
+
+# Basic stats per replicate
+
+Many many more cells in rep4.
+```{r}
+seurat@meta.data %>% group_by(orig.ident) %>% summarise(Count = n()) %>% 
+  ggplot(aes(x=orig.ident,y=Count, label = Count)) + geom_bar(stat = 'identity') +
+  geom_text(position =position_nudge(y=200)) +
+  coord_flip() +
+  cowplot::theme_cowplot()
+```
+
+# Feature stats
+But .... everything looks fairly the same between all four replicates.... so let's just keep it all for now? There's a larger size range in rep 4 of number of unique genes (nFeature_RNA) captured for some reason.
+```{r}
+VlnPlot(seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by = 'orig.ident')
+```
+# Filtering
+Remove cells with percent.mt > 10%
+
+```{r, fig.width=6}
+seurat <- subset(seurat, subset = nFeature_RNA > 200  & percent.mt < 10)
+
+seurat@meta.data %>% group_by(orig.ident) %>% summarise(Count = n()) %>% 
+  ggplot(aes(x=orig.ident,y=Count, label = Count)) + geom_bar(stat = 'identity') +
+  geom_text(position =position_nudge(y=200)) +
+  coord_flip() +
+  cowplot::theme_cowplot()
+```
+# PCA
+```{r}
+seurat <- NormalizeData(seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+
+
+
+seurat <- FindVariableFeatures(seurat, selection.method = "vst", nfeatures = 2000)
+
+all.genes <- rownames(seurat)
+seurat <- ScaleData(seurat, features = all.genes)
+
+
+
+seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat), npcs = 50)
+print(seurat[["pca"]], dims = 1:10, nfeatures = 10)
+
+
+DimPlot(seurat, reduction = "pca")
+```
+# Heatmaps by PC
+```{r, fig.width=16, fig.height=16}
+DimHeatmap(seurat, dims = 1:30, cells = 500, balanced = TRUE)
+```
+# Jackstraw plot
+
+Goal is to roughly figure out how many Principal Components (from PCA) to use downstream. I picked 20.
+```{r}
+seurat <- JackStraw(seurat, num.replicate = 100, dims = 50)
+seurat <- ScoreJackStraw(seurat, dims = 1:50)
+
+
+JackStrawPlot(seurat, dims = 1:50)
+
+
+ElbowPlot(seurat, ndims = 50)
+```
+# Clustering and get markers for each cluster
+```{r}
+seurat <- FindNeighbors(seurat, dims = 1:20)
+seurat <- FindClusters(seurat, resolution = 0.5)
+seurat <- RunUMAP(seurat, dims = 1:20)
+
+
+DimPlot(seurat, reduction = "umap")
+
+
+seurat.markers <- list()
+for (i in seurat@meta.data$seurat_clusters %>% unique()){
+  seurat.markers[[i]] <- FindMarkers(seurat, ident.1 = i, only.pos = TRUE, logfc.threshold = 0.5)
+}
+
+```
+
+# Regress out G2M <-> S phase diff
+
+As the previous analysis essentially had clusters by cell phase, which is of less interest
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+
+m.s.genes <-s.genes %>% str_to_title()
+m.g2m.genes <- g2m.genes %>% str_to_title()
+seurat <- CellCycleScoring(seurat, s.features = m.s.genes, g2m.features = m.g2m.genes)
+
+DimPlot(seurat, group.by = 'Phase')
+
+
+seurat$CC.Difference <- seurat$S.Score - seurat$G2M.Score
+options(future.globals.maxSize = 8000 * 1024^2)
+seuratCC <- ScaleData(seurat, vars.to.regress = "CC.Difference", features = rownames(seurat))
+seuratCC <- RunPCA(seuratCC, features = VariableFeatures(object = seuratCC), npcs = 50)
+DimPlot(seuratCC, reduction = "pca")
+
+seuratCC <- FindNeighbors(seuratCC, dims = 1:20)
+seuratCC <- FindClusters(seuratCC, resolution = 0.5)
+seuratCC <- RunUMAP(seuratCC, dims = 1:20)
+
+
+DimPlot(seuratCC, reduction = "umap")
+DimPlot(seuratCC, reduction = "umap", group.by = 'Phase')
+
+seurat.markersCC <- list()
+for (i in seuratCC@meta.data$seurat_clusters %>% unique()){
+  seurat.markersCC[[i]] <- FindMarkers(seuratCC, ident.1 = i, only.pos = TRUE, logfc.threshold = 0.5)
+}
+
+```
+
+# Output files
+```{r}
+save(seurat.markers, seurat, seurat.markersCC, seuratCC, file = '../data/00_process_output.Rdata')
+```
+
+# Session
+```{r}
+sessionInfo()
+```

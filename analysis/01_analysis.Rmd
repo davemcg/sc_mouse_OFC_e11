@@ -1,0 +1,185 @@
+---
+title: "Quick Analysis"
+output: 
+  html_notebook:
+    theme: flatly
+    toc: true
+    toc_float: true
+---
+
+# What is this?
+E11.5 (or E11?) mouse RPE
+
+Run on 10x v3 platform
+
+This is a trial run to determine whether Elan can process mouse tissue at this very early time point.
+
+# When
+2022-05-10
+
+# Process Data
+```{bash}
+Rscript -e 'library(rmarkdown); rmarkdown::render("00_process.Rmd", "html_document")'
+```
+
+# Load Data
+
+Quick peek at Elan's favorite Zfp503 and how which cluster it is differentially expressed in
+```{r}
+library(tidyverse)
+library(Seurat)
+load('../data/00_process_output.Rdata')
+seurat.markersCC <- seurat.markersCC %>% bind_rows(.id = 'cluster') %>% as_tibble(rownames = 'Gene') %>% mutate(Gene = gsub('\\.\\.\\.\\d+','',Gene))
+# seurat.markersCC %>% 
+#   group_by(cluster) %>% slice_max(avg_log2FC, n = 3, with_ties = FALSE) %>% 
+#   DT::datatable()
+seurat.markersCC %>% bind_rows() %>%  filter(Gene == 'Zfp503')
+```
+
+# GO Terms
+For each cluster
+
+To help roughly figure out which clusters as which cell types
+```{r, fig.height=7, fig.width=4}
+library(clusterProfiler)
+library(enrichplot)
+eg_universe = bitr(seuratCC %>% row.names(), fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+
+go_enrichCC <- list()
+for (i in seurat.markersCC$cluster %>% unique()){
+  print(i)
+  diff_genes <- seurat.markersCC %>% filter(cluster  == i)
+  eg_diff_genes <- bitr(diff_genes$Gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+  eg_diff_genes <- diff_genes %>% left_join(., eg_diff_genes, by = c('Gene' = 'SYMBOL'))
+  go_enrichCC[[i]] <- enrichGO(gene          = eg_diff_genes$ENTREZID,
+                             universe      = eg_universe$ENTREZID,
+                             OrgDb         = org.Mm.eg.db,
+                             ont           = "all",
+                             pAdjustMethod = "BH",
+                             pvalueCutoff  = 0.01,
+                             qvalueCutoff  = 0.05,
+                             readable      = TRUE)
+}
+
+
+
+for (i in seurat.markersCC$cluster %>% unique() %>% sort()){
+  print(dotplot(go_enrichCC[[i]], showCategory=30) + ggtitle(glue::glue("Dotplot for cluster {i}")))
+}
+ 
+
+```
+
+# Hand label each cluster (guessing the cell type)
+```{r}
+ct_cluster_CC <- rbind(c(0, "RPC"),
+  c(1, 'RPC'),
+  c(2, 'RPE Precursor'),
+  c(3, 'Fibroblast'),
+  c(4, 'Fibroblast'),
+  c(5, 'Optic Fissure'),
+  c(6, 'Proliferating RPC'),
+  c(7, 'Epithelial'),
+  c(8, 'Red Blood Cell'),
+  c(9, 'Corneal Progenitor'),
+  c(10, 'Blood Vessel'),
+  c(11, "PBMC"),
+  c(12, "NK/T"),
+  c(13, "Lens"
+  )) %>% data.frame()
+colnames(ct_cluster_CC) <- c('seurat_clusters','CellType')
+seuratCC@meta.data$CellType <- seuratCC@meta.data %>% dplyr::select(seurat_clusters) %>% left_join(ct_cluster_CC) %>% pull(CellType)
+
+# ct_cluster <- c(0, "RPC",
+#   1, 'Fibroblasts',
+#   2, 'RPC',
+#   3, 'RPE Precursor',
+#   4, 'Cornea - JCT - TM?',
+#   5, 'Optic Fissure',
+#   6, 'Proliferating RPC',
+#   7, 'Epithelial',
+#   8, 'Red Blood Cell',
+#   9, '?',
+#   10, 'Vessel',
+#   11, "Macrophage/Microglia")
+
+```
+
+# UMAP
+With my poorly researched cell type assignments
+```{r, fig.width=5, fig.height=5}
+DimPlot(seuratCC, reduction = "umap", group.by = 'CellType', label = TRUE, label.box = TRUE) + 
+  scale_color_manual(values = pals::alphabet2() %>% unname()) +
+  scale_fill_manual(values = pals::alphabet2() %>% unname() ) 
+```
+
+# Cell Phase 
+```{r}
+DimPlot(seuratCC, group.by = 'Phase')
+```
+# Markers
+```{r, fig.width=8}
+FeaturePlot(seuratCC, features = c("Pax2", "Ntn1", "Smoc2", "Vax1", 
+                                 "Ttr", "Dct", "Rho", "Zfp503", "Mitf",
+                                 "Pax6"))
+```
+
+# Top 10 Cluster 5 (Optic Fissure?) Diff Genes
+```{r, fig.width=8}
+
+top_genes <- seurat.markersCC %>%  
+  left_join(seuratCC@meta.data %>% as_tibble() %>% 
+              dplyr::select(cluster = seurat_clusters, CellType) %>% unique()) %>% 
+  group_by(cluster, CellType) %>% top_n(30, avg_log2FC) %>% 
+  filter(cluster == 5) %>% head(15) %>% pull(Gene)
+FeaturePlot(seuratCC, features = top_genes)
+```
+
+# Zfp503 Like Genes
+
+Zfp503 is overexpressed in both clusters 2 and 5
+
+What other genes have this characteristic?
+```{r, fig.width=8}
+
+ seurat.markersCC %>% filter(cluster %in% c(2,5), avg_log2FC > 0.7, p_val_adj < 0.01) %>% 
+  group_by(Gene) %>% 
+  summarise(Count = n(), avg_log2FC = mean(avg_log2FC)) %>% 
+  filter(Count == 2)
+
+FeaturePlot(seuratCC, features = seurat.markersCC %>% filter(cluster %in% c(2,5), avg_log2FC > 0.7, p_val_adj < 0.01) %>% 
+  group_by(Gene) %>% 
+  summarise(Count = n(), avg_log2FC = mean(avg_log2FC)) %>% 
+  filter(Count == 2) %>% 
+    pull(Gene))
+
+```
+
+# Cluster diff expressed genes
+
+Top 30 gene for each cluster (I was using this table along with the GO terms to guess each cell type for each cluster)
+```{r}
+seurat.markersCC %>%  
+  left_join(seuratCC@meta.data %>% as_tibble() %>% 
+              dplyr::select(cluster = seurat_clusters, CellType) %>% unique()) %>% 
+  group_by(cluster, CellType) %>% top_n(30, avg_log2FC) %>% 
+  relocate(CellType) %>% 
+  arrange(cluster) %>% 
+  DT::datatable()
+```
+
+# Quick comments
+
+1. The experiment appears to have worked
+2. You seem to have a Optic Fissure specific cluster?? Cluster 5. Several interesting genes in that cluster.
+
+# Output Cluster and UMAP for Loupe
+```{r}
+write_csv(seuratCC@reductions$umap@cell.embeddings %>% as_tibble(rownames = 'Barcode'), file = 'umap.loupe.csv')
+write_csv(seuratCC@meta.data %>% as_tibble(rownames = 'Barcode') %>% dplyr::select(Barcode, seurat_clusters), file = 'cluster.loupe.csv')
+```
+
+# Sesssion Info
+```{r}
+devtools::session_info()
+```
