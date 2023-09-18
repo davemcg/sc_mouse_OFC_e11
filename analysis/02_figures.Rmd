@@ -5,6 +5,8 @@ output:
     theme: flatly
     toc: true
     toc_float: true
+    author: "David McGaughey"
+    date: "2023-09-18"
 ---
 
 
@@ -13,6 +15,7 @@ output:
 ```{r}
 library(tidyverse)
 library(Seurat)
+library(ggrepel)
 load('../data/00_process_output.Rdata')
 seurat.markersCC <- seurat.markersCC %>% bind_rows(.id = 'cluster') %>% as_tibble(rownames = 'Gene') %>% mutate(Gene = gsub('\\.\\.\\.\\d+','',Gene))
 ```
@@ -53,13 +56,6 @@ seuratCC@meta.data$CellType <- seuratCC@meta.data %>% dplyr::select(seurat_clust
 ```
 
 # UMAP
-With my poorly researched cell type assignments
-```{r, fig.width=10, fig.height=10}
-DimPlot(seuratCC, reduction = "umap", group.by = 'CellType', label = TRUE, label.box = TRUE) + 
-  scale_color_manual(values = pals::alphabet2() %>% unname()) +
-  scale_fill_manual(values = pals::alphabet2() %>% unname() ) + theme(legend.position = "none")
-```
-
 
 ```{r, fig.width=5, fig.height=5}
 Seurat::FetchData(seuratCC, vars = c("UMAP_1","UMAP_2", "CellType")) %>%
@@ -74,72 +70,131 @@ Seurat::FetchData(seuratCC, vars = c("UMAP_1","UMAP_2", "CellType")) %>%
   geom_text_repel(data = . %>% group_by(CellType) %>%
                     summarise(UMAP_1 = mean(UMAP_1),
                               UMAP_2 = mean(UMAP_2)),
-                  color = 'gray10',
+                  color = 'gray20',
                   bg.color = 'gray90') +
   xlab("UMAP 1") + ylab("UMAP 2")
 ```
 
-# Markers
-```{r, fig.width=8}
-FeaturePlot(seuratCC, features = c("Pax2", "Ntn1", "Smoc2", "Vax1", 
-                                   "Ttr", "Dct", "Rho", "Zfp503", "Mitf",
-                                   "Pax6"))
-```
-
-# Top 10 Cluster 5 (Optic Fissure?) Diff Genes
-```{r, fig.width=8}
-
-top_genes <- seurat.markersCC %>%  
-  left_join(seuratCC@meta.data %>% as_tibble() %>% 
-              dplyr::select(cluster = seurat_clusters, CellType) %>% unique()) %>% 
-  group_by(cluster, CellType) %>% top_n(30, avg_log2FC) %>% 
-  filter(cluster == 5) %>% head(15) %>% pull(Gene)
-FeaturePlot(seuratCC, features = top_genes)
-```
-
-# Zfp503 Like Genes
-
-Zfp503 is overexpressed in both clusters 2 and 5
-
-What other genes have this characteristic?
-```{r, fig.width=8}
-
-seurat.markersCC %>% filter(cluster %in% c(2,5), avg_log2FC > 0.7, p_val_adj < 0.01) %>% 
-  group_by(Gene) %>% 
-  summarise(Count = n(), avg_log2FC = mean(avg_log2FC)) %>% 
-  filter(Count == 2)
-
-FeaturePlot(seuratCC, features = seurat.markersCC %>% filter(cluster %in% c(2,5), avg_log2FC > 0.7, p_val_adj < 0.01) %>% 
-              group_by(Gene) %>% 
-              summarise(Count = n(), avg_log2FC = mean(avg_log2FC)) %>% 
-              filter(Count == 2) %>% 
-              pull(Gene))
-
-```
-
-# Cluster diff expressed genes
-
-Top 30 gene for each cluster (I was using this table along with the GO terms to guess each cell type for each cluster)
+## Barplot of Cell Counts
 ```{r}
+Seurat::FetchData(seuratCC, vars = c("UMAP_1","UMAP_2", "CellType")) %>%
+  group_by(CellType) %>% 
+  summarise(Count = n()) %>% 
+  ggplot(aes(x=reorder(CellType, Count), y=Count)) + 
+  geom_bar(stat='identity') +
+  xlab("CellType") +
+  coord_flip() + 
+  cowplot::theme_cowplot()
+```
+
+## Markers
+
+```{r, fig.width=16, fig.height=7}
+genes <- c("Pax2", "Nr2f1", "Zic1", "Cp", 
+           "Vim", "Ptn", "Minar2", "Cst3", "Fabp3",
+           "Bmpr1b","Fam171b","Ezr","Zic4",
+           "Apoe","Rmst")
+
+plot_list <- list()
+for (i in genes){
+  plot_list[[i]] <- Seurat::FetchData(seuratCC, vars = c("UMAP_1","UMAP_2", i)) %>% 
+    pivot_longer(-c(UMAP_1,UMAP_2), names_to = 'Gene', values_to = 'Expression') %>% 
+    filter(Expression > 0) %>% 
+    ggplot(aes(x=UMAP_1,y=UMAP_2)) + 
+    geom_point(data = Seurat::FetchData(seuratCC, vars = c("UMAP_1","UMAP_2")),
+               color = 'gray90', size = 0.4) +
+    geom_point( aes(color = Expression), size = 0.4) +
+    scale_color_gradient(low = 'gray85', high = 'navyblue', name = '') +
+    #scale_color_brewer(low = 'slateblue1', high = 'slateblue4', name = '') +
+    cowplot::theme_cowplot() + 
+    facet_wrap(~Gene) + 
+    xlab("UMAP 1") + 
+    ylab("UMAP 2")
+}
+
+cowplot::plot_grid(plotlist = plot_list, ncol = 5)
+```
+
+
+# Heatmap   
+Pick your genes. I'm just using the list from above.
+```{r}
+library(ComplexHeatmap)
+counts <- Seurat::FetchData(seuratCC, vars = c('CellType', genes)) %>% arrange(CellType) 
+ct_color <- pals::glasbey(n = length(unique(counts$CellType)))
+names(ct_color) <- counts$CellType %>% unique() %>% sort()
+
+col_anno <- HeatmapAnnotation(df = data.frame(CellType = counts$CellType %>% factor()),
+                                  col = list(CellType = ct_color))
+
+hm_counts <- counts[,-1] %>% as.matrix() %>% t()
+colnames(hm_counts) <- NULL
+
+col_fun <- circlize::colorRamp2(c(0,3), c("#440154FF","#FDE725FF"))
+Heatmap(hm_counts, top_annotation = col_anno, cluster_columns = FALSE, col = col_fun, name = ' ' )
+```
+
+
+
+# Top Cluster 5 (Optic Fissure) Diff Genes
+
+For a table?
+```{r, fig.width=8}
+
 seurat.markersCC %>%  
   left_join(seuratCC@meta.data %>% as_tibble() %>% 
               dplyr::select(cluster = seurat_clusters, CellType) %>% unique()) %>% 
-  group_by(cluster, CellType) %>% top_n(30, avg_log2FC) %>% 
-  relocate(CellType) %>% 
-  arrange(cluster) %>% 
+  filter(cluster == 5, p_val_adj < 0.01) %>% 
   DT::datatable()
+
 ```
 
-# Quick comments
-
-1. The experiment appears to have worked
-2. You seem to have a Optic Fissure specific cluster?? Cluster 5. Several interesting genes in that cluster.
-
-# Output Cluster and UMAP for Loupe
+## GO Enrichment 
 ```{r}
-write_csv(seuratCC@reductions$umap@cell.embeddings %>% as_tibble(rownames = 'Barcode'), file = 'umap.loupe.csv')
-write_csv(seuratCC@meta.data %>% as_tibble(rownames = 'Barcode') %>% dplyr::select(Barcode, seurat_clusters), file = 'cluster.loupe.csv')
+library(clusterProfiler)
+library(enrichplot)
+
+
+diff_genes <- seurat.markersCC %>%  
+  left_join(seuratCC@meta.data %>% as_tibble() %>% 
+              dplyr::select(cluster = seurat_clusters, CellType) %>% unique()) %>% 
+  filter(cluster == 5, p_val_adj < 0.01)
+
+eg_diff_genes <- bitr(diff_genes$Gene, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+eg_diff_genes <- diff_genes %>% left_join(., eg_diff_genes, by = c('Gene' = 'SYMBOL'))
+# only keep genes that have a mean of >= 10 reads across all sample
+expressed <- seuratCC@assays$RNA[seuratCC@assays$RNA %>% rowSums() > 10,] %>% row.names()
+eg_universe = bitr(expressed, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+ego <- enrichGO(gene          = eg_diff_genes$ENTREZID,
+                universe      = eg_universe$ENTREZID,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "all",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+                readable      = TRUE)
 ```
+
+```{r, fig.width=6, fig.height=10}
+p1 <- dotplot(ego, showCategory=30) + ggtitle("Dotplot for GO")
+p1
+```
+
+### Table
+```{r}
+ego <- setReadable(ego, OrgDb = org.Mm.eg.db, keyType = 'ENTREZID')
+ego@result %>% DT::datatable()
+```
+### "CNET" Plot
+Relationships between related GO terms with shared genes
+```{r, fig.width=6, fig.height=4}
+geneList <- eg_diff_genes$avg_log2FC
+names(geneList) <- eg_diff_genes$Gene
+cnet <- cnetplot(ego, foldChange = geneList) + scale_color_viridis_c(name = 'log2(FoldChange)')
+cnet
+```
+
+
 
 # Sesssion Info
 ```{r}
