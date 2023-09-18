@@ -16,6 +16,8 @@ output:
 library(tidyverse)
 library(Seurat)
 library(ggrepel)
+library(org.Mm.eg.db)
+library(ComplexHeatmap)
 load('../data/00_process_output.Rdata')
 seurat.markersCC <- seurat.markersCC %>% bind_rows(.id = 'cluster') %>% as_tibble(rownames = 'Gene') %>% mutate(Gene = gsub('\\.\\.\\.\\d+','',Gene))
 ```
@@ -57,7 +59,7 @@ seuratCC@meta.data$CellType <- seuratCC@meta.data %>% dplyr::select(seurat_clust
 
 # UMAP
 
-```{r, fig.width=5, fig.height=5}
+```{r, fig.width=5, fig.height=4}
 Seurat::FetchData(seuratCC, vars = c("UMAP_1","UMAP_2", "CellType")) %>%
   ggplot(aes(x=UMAP_1,
              y=UMAP_2, 
@@ -175,7 +177,7 @@ ego <- enrichGO(gene          = eg_diff_genes$ENTREZID,
                 readable      = TRUE)
 ```
 
-```{r, fig.width=6, fig.height=10}
+```{r, fig.width=10, fig.height=14}
 p1 <- dotplot(ego, showCategory=30) + ggtitle("Dotplot for GO")
 p1
 ```
@@ -187,7 +189,7 @@ ego@result %>% DT::datatable()
 ```
 ### "CNET" Plot
 Relationships between related GO terms with shared genes
-```{r, fig.width=6, fig.height=4}
+```{r, fig.width=10, fig.height=8}
 geneList <- eg_diff_genes$avg_log2FC
 names(geneList) <- eg_diff_genes$Gene
 cnet <- cnetplot(ego, foldChange = geneList) + scale_color_viridis_c(name = 'log2(FoldChange)')
