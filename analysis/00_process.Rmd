@@ -104,7 +104,7 @@ DimPlot(seurat, reduction = "umap")
 
 seurat.markers <- list()
 for (i in seurat@meta.data$seurat_clusters %>% unique()){
-  seurat.markers[[i]] <- FindMarkers(seurat, ident.1 = i, only.pos = TRUE, logfc.threshold = 0.5)
+  seurat.markers[[i]] <- FindMarkers(seurat, ident.1 = i, only.pos = TRUE, logfc.threshold = 0.3)
 }
 
 ```
@@ -140,14 +140,15 @@ DimPlot(seuratCC, reduction = "umap", group.by = 'Phase')
 
 seurat.markersCC <- list()
 for (i in seuratCC@meta.data$seurat_clusters %>% unique()){
-  seurat.markersCC[[i]] <- FindMarkers(seuratCC, ident.1 = i, only.pos = TRUE, logfc.threshold = 0.5)
+  seurat.markersCC[[i]] <- FindMarkers(seuratCC, ident.1 = i, only.pos = TRUE, logfc.threshold = 0.3)
 }
 
 ```
 
 # Output files
 ```{r}
-save(seurat.markers, seurat, seurat.markersCC, seuratCC, file = '../data/00_process_output.Rdata')
+# 2023-10-30 changed the logFC cutoff to 0.3 for the diff testing
+save(seurat.markers, seurat, seurat.markersCC, seuratCC, file = '../data/00_process_output.freeze_2023_10_30.Rdata')
 ```
 
 # Session
