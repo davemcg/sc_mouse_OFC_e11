@@ -1,0 +1,248 @@
+---
+title: "Deep Analysis of RPC/RPE/OF-OS Cells"
+output: 
+  html_notebook:
+    theme: flatly
+    toc: true
+    toc_float: true
+    author: "David McGaughey"
+    date: "2023-11-02"
+---
+
+# 2023-11-02
+
+# Goal
+Elan noted that many (all?) of the differentially expressed genes identified in the 00/01 analysis OF/OC cluster were,
+after doing ISH, were quite OS (proximal) oriented. Elan/Brian wonder if the OF/OC cluster can be further divided 
+to distinguish between proximal/distal in the OS/OF cluster.
+
+# Approach
+1. Take the 00/01_analysis.Rmd clustering and cell type labeling
+2. Filter / subset to the pRPE/pNR/OS-OF cells
+3. Re-run the HVG selection / PCA / etc
+4. See what comes of it (this document)
+
+# Abbreviations
+
+  - RPC: Retinal Progenitor Cell
+  - pRPE: presumptive RPE
+  - OS/OF: Optic Stalk/Optic Fissure
+
+# tldr
+I cannot make any useful subcluster of the existing OF/OS cluster. I *did* subdivide the RPC into three subgroups:
+  
+  - dorsal
+  - ventral (a bit fuzzier than the dorsal clusters)
+  - fate restricted (expression of required retinal cell type neuron transcription factors like Ascl1/Neurog2/Rorb which)
+  
+# OF/OS Subdivision
+
+I provide a simple correlation based system to identify differentially expressed genes within the OF/OS cluster that are most (dis)similar to each other. We can use this (maybe???) to identify (or confirm???) genes with similar spatial expression patterns within the OS/OF.
+
+# Notes on location(s) of gene expression in E11.5 eye cup 
+
+(Crib sheet for David M)
+
+At about E11.5
+
+Proximal/Distal ("Stalk to Lens") Axis
+Pax2: Stalk
+Pax6: NR
+
+Vax1 and Pax2: Optic Stalk specific
+Aldh1a3 and Vax2: Ventral (around and including fissure) NR expression
+Bmp4/Tbx5: Dorsal NR
+Sox2 and Vsx2: NR (dorsal and ventral)
+Pax6: NR and RPE
+
+Unicorn gene (as in I don't think anything else is known to have this pattern?)
+Ntn1: Distal OF
+
+# Review of retinal fate determination
+
+https://www.cell.com/trends/neurosciences/fulltext/S0166-2236%2812%2900087-2
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  message = FALSE,  warning = FALSE,
+  collapse = TRUE,
+  fig.width = 12, fig.height = 8,
+  comment = "#>",
+  dpi=300
+)
+```
+
+```{bash}
+#Rscript nr_rpe_of_filtering_2023_10.R
+```
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ComplexHeatmap)
+library(ggrepel)
+load('../data/03_nr_rpe_of_filtering.freeze_2023.11.01.Rdata')
+```
+
+```{r, fig.width=10, fig.height=8}
+cowplot::plot_grid(plotlist = list(DimPlot(seuratCCSUB, reduction = "umap", label = TRUE, label.box = TRUE) +
+                                     scale_color_manual(values = pals::alphabet2() %>% unname()) +
+                                     scale_fill_manual(values = pals::alphabet2() %>% unname()),
+                                   FeaturePlot(seuratCCSUB, reduction = "umap",  features = 'CellType' ) +
+                                     scale_color_manual(values = pals::alphabet() %>% unname()),
+                                   FeaturePlot(seuratCCSUB, reduction = "umap", features =  'percent.mt' ),
+                                   DimPlot(seuratCCSUB, reduction = "umap", group.by =  'Phase' )+
+                                     scale_fill_manual(values = pals::alphabet() %>% unname())),
+                   ncol = 2)
+
+```
+# Hand Label Clusters Redux
+```{r, fig.height=4, fig.width=5}
+ct_cluster_CC <- rbind(c(0, "pRPE"),
+                       c(1, 'RPC (Ventral)'),
+                       c(2, 'RPC (Ventral)'),
+                       c(3, 'OF/OS'),
+                       c(4, 'RPC (Ventral)'),
+                       c(5, 'RPC (Fate Restriction)'),
+                       c(6, 'RPC (Ventral)'),
+                       c(7, 'OF/OS'),
+                       c(8, 'RPC (Dorsal)'),
+                       c(9, 'RPC (Dorsal)'),
+                       c(10, 'RPC (Ventral)'),
+                       c(11, "pRPE"),
+                       c(12, 'RPC (Dorsal)'),
+                       c(13, "pRPE"),
+                       c(14, 'OF/OS')
+) %>% data.frame()
+colnames(ct_cluster_CC) <- c('seurat_clusters','CellTypeNR')
+seuratCCSUB@meta.data$CellTypeNR <- seuratCCSUB@meta.data %>% dplyr::select(seurat_clusters) %>% left_join(ct_cluster_CC, by = 'seurat_clusters') %>% pull(CellTypeNR)
+
+umap_plot_CT <- Seurat::FetchData(seuratCCSUB, vars = c("UMAP_1","UMAP_2", "CellTypeNR","seurat_clusters")) %>%
+  ggplot(aes(x=UMAP_1,
+             y=UMAP_2, 
+             color = CellTypeNR, 
+             label = CellTypeNR)) +
+  cowplot::theme_cowplot() +
+  scale_color_manual(values = pals::glasbey() %>% unname()) +
+  scale_fill_manual(values = pals::glasbey() %>% unname() ) + theme(legend.position = "none") +
+  geom_point(size = 1, alpha = 0.8) +
+  geom_label_repel(data = . %>% group_by(CellTypeNR) %>%
+                     summarise(UMAP_1 = mean(UMAP_1),
+                               UMAP_2 = mean(UMAP_2)),
+                   aes(color = CellTypeNR),
+                   bg.color = 'gray20') +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+umap_plot_sc <- Seurat::FetchData(seuratCCSUB, vars = c("UMAP_1","UMAP_2", "CellTypeNR","seurat_clusters")) %>%
+  ggplot(aes(x=UMAP_1,
+             y=UMAP_2, 
+             color = seurat_clusters, 
+             label = seurat_clusters)) +
+  cowplot::theme_cowplot() +
+  scale_color_manual(values = pals::glasbey() %>% unname()) +
+  scale_fill_manual(values = pals::glasbey() %>% unname() ) + theme(legend.position = "none") +
+  geom_point(size = 1, alpha = 0.8) +
+  geom_label_repel(data = . %>% group_by(seurat_clusters) %>%
+                     summarise(UMAP_1 = mean(UMAP_1),
+                               UMAP_2 = mean(UMAP_2)),
+                   color = 'gray20',
+                   bg.color = 'gray90') +
+  xlab("UMAP 1") + ylab("UMAP 2")
+
+
+umap_plot_CT
+#umap_plot_sc
+```
+
+# Diff Testing
+```{r}
+ctnr <- list()
+Idents(seuratCCSUB) <- seuratCCSUB@meta.data$CellTypeNR
+for (i in seuratCCSUB@meta.data$CellTypeNR %>% unique() %>% sort()){
+  print(i)
+  ctnr[[i]] <- FindMarkers(seuratCCSUB, ident.1 = i, only.pos = TRUE, logfc.threshold = 0.2, verbose = FALSE) %>% as_tibble(rownames = 'Gene')
+}
+ctnr_out <- ctnr
+names(ctnr_out) <- str_replace_all(names(ctnr_out), "[[:punct:]]", "-")
+writexl::write_xlsx(ctnr_out, '../data/03_diff_testing_results.xlsx')
+```
+
+```{r}
+ctnr %>% bind_rows(.id = 'CellType') %>% DT::datatable(filter = 'top')
+```
+
+# Just a massive set of UMAP plots
+
+So the "dorsal" pNR is well defined by the clustering (see Tbx5, Bmp4) and how they align clearly with clusters 12/9. The "ventral" is less clearly aligned with the clustering (Vax2). For some reason it seems to run along the edges of the UMAP. Despite a lot of fussing I can't get the clustering to split clearly with it. So somehow the UMAP view is yanking those cells towards the outer edges. 
+
+```{r, fig.width=15, fig.height=19}
+dot_size = 0.2
+giant_gene_set <- c('Ntn1','Vax1','Sox1','Fzd8','Shtn1','Slitrk1','Smoc1','Dlk1','Pmel','Mitf','Pax2','Rax','Nr2e1','Six3','Pax6','Sox2','Vsx2','Vax2','Aldh1a3','Aldh1a1','Bmp4','Tbx5','Foxd1','Neurod1','Ascl1','Tbx2','Cyp1b1','Neurog2','Atoh7','Isl1','Rorb')
+fp_plots <- FeaturePlot(seuratCCSUB, reduction = "umap", features =
+                          giant_gene_set, pt.size = dot_size)
+
+overview <- cowplot::plot_grid(plotlist = list(DimPlot(seuratCCSUB, reduction = "umap", label = TRUE, label.box = TRUE) +
+                                                 scale_color_manual(values = pals::alphabet2() %>% unname()) +
+                                                 scale_fill_manual(values = pals::alphabet2() %>% unname()),
+                                               DimPlot(seuratCCSUB, reduction = "umap", label = TRUE, label.box = TRUE, group.by = 'seurat_clusters') +
+                                                 scale_color_manual(values = pals::alphabet2() %>% unname()) +
+                                                 scale_fill_manual(values = pals::alphabet2() %>% unname())),
+                               ncol = 2)
+
+cowplot::plot_grid(overview,
+                   fp_plots, nrow = 2, rel_heights = c(0.2,1))
+```
+
+```{r}
+library(ComplexHeatmap)
+counts <- Seurat::FetchData(seuratCCSUB, vars = c('seurat_clusters', 'CellTypeNR', giant_gene_set)) %>% arrange(CellTypeNR,seurat_clusters)
+ct_color <- pals::glasbey(n = length(unique(counts$CellType)))
+names(ct_color) <- counts$CellType %>% unique() %>% sort()
+
+clus_color <- pals::alphabet(n = length(unique(counts$seurat_clusters)))
+names(clus_color) <- counts$seurat_clusters %>% unique() %>% sort()
+
+col_anno <- HeatmapAnnotation(df = data.frame(seurat_clusters = counts$seurat_clusters %>% factor(),
+                                              CellType = counts$CellTypeNR %>% as.factor()),
+                              col = list(seurat_clusters = clus_color,CellType = ct_color))
+
+hm_counts <- counts[,c(3:ncol(counts))] %>% as.matrix() %>% t()
+colnames(hm_counts) <- NULL
+
+col_fun <- circlize::colorRamp2(c(0,2), c("#440154FF","#FDE725FF"))
+Heatmap(t(scale(t(hm_counts))), top_annotation = col_anno, cluster_columns = FALSE, col = col_fun, name = ' ' , use_raster = FALSE)
+
+```
+
+# Correlation of OS/OF Diff Genes
+
+Here we take the ~100 positively expressed (logFC > 0.4 and p_adj < 0.01) genes in the OF/OS cluster and see how they are correlated with EACH OTHER WITHIN THE OF/OS CLUSTER CELLS. My hypothesis is that positively correlated genes have similar function/anatomic location. This provides a framework in which to get "here is a gene I like - what are other genes with a (dis)similar expression pattern?"
+
+Ntn1 and Slitrk1 are positively correlated. Which means there are overlapping expression of Ntn1/Slitrk1 in the same cells. Interesting finding as (if I recall correctly) Slitrk1 is much more proximally/OS expressed than Ntn1.
+```{r}
+counts <- Seurat::FetchData(seuratCCSUB, vars = ctnr[['OF/OS']] %>% filter(p_val_adj< 0.01, avg_log2FC > 0.4) %>% pull(Gene)) 
+of_counts <- counts[row.names(seuratCCSUB@meta.data %>% filter(CellTypeNR == 'OF/OS')),]
+cor(of_counts ) %>% as_tibble(rownames = 'Gene1') %>% pivot_longer(-Gene1, names_to = 'Gene2', values_to = 'Correlation') %>% DT::datatable(filter="top")
+```
+```{r, fig.width=20, fig.height=17}
+
+ComplexHeatmap::Heatmap(cor(of_counts ))
+```
+
+## Highly correlated gene with Ntn1 in the OS/OF Cluster
+
+This isn't the MOST correlated gene (that is Aldh1a3), but this is a gene that in the hierarchical clustering view is placed next to Ntn1. 
+
+Adgrl3 has recently gotten a fair amount of attention as a ADHD / neuroses associated gene.
+
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8301925/
+
+"ADGRL3 (previously known as LPHN3), on the other hand, is a member of the latrophilin subfamily of G-protein coupled receptors and is highly expressed in the brain, particularly in the amygdala, the caudate and pontine nucleus, and cerebellum [58,59,60,86,93,145]. ADGRL3 plays an important role in cellular adhesion and signal transduction, and is also expressed in the cornea [146] and is associated with alterations in the neuronal activities in visual tasks (i.e., Go/No-Go tasks) [147]. Latrophilins are relevant for neuronal development and brain functions [148]. Furthermore, ADGRL3 has been shown to interact with DRD4 (i.e., dysfunction and signaling in DRD4 are mediated by the action of ADGRL3 [86,149]), affecting the development of dopaminergic neurons [150]."
+
+```{r}
+FeaturePlot(seuratCCSUB, reduction = "umap", c('Adgrl3','Ntn1'))
+```
+
+```{r}
+sessionInfo()
+```
