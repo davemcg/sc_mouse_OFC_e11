@@ -1,0 +1,436 @@
+---
+title: "E11.5 Pilot Eye Cup scRNA"
+date: "`r Sys.Date()`"
+output: 
+  html_notebook:
+    author: "David McGaughey"
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+# Introduction
+
+Rough workflow (done with https://github.com/davemcg/OGVFB_RNAseq/blob/master/src/scRNA_quick_start.R):
+
+1. CellRanger to do quantitation (reduce the raw sequence to gene counts by cell)
+2. Aggregate all counts across all samples into one matrix
+3. Select top N (2000 in this case) highly variable genes to use for the PCA (using all genes is SLOW and often counterproductive)
+4. PCA to identify major axes of variation - use top 20 PC
+5. Clustering on the 20 PC
+6. UMAP visualization to reduce the 20 PC to 2 dimensions for our puny brains
+
+# Load Data
+```{r}
+library(HDF5Array)
+library(scran)
+library(tidyverse)
+h5closeAll()
+load('~/data/sc_mouse_OFC_e11/data/bioc_dims20_hvg1000_subset1-2-3-4.obj.Rdata')
+sce <- loadHDF5SummarizedExperiment('~/data/sc_mouse_OFC_e11/data/bioc_dims20_hvg1000_subset1-2-3-4/')
+# put in solo doublet scoring
+colData(sce) <- colData(sce) %>% as_tibble() %>% 
+  mutate(Barcode2 = paste0(gsub("-\\d+","",Barcode), '-', sample_number)) %>% 
+  left_join(solo_scores,  by = c("Barcode2" = "barcode")) %>% DataFrame()
+colData(sce_full) <- colData(sce_full) %>% as_tibble() %>% 
+  mutate(Barcode2 = paste0(gsub("-\\d+","",Barcode), '-', sample_number)) %>% 
+  left_join(solo_scores,  by = c("Barcode2" = "barcode")) %>% DataFrame()
+
+# load in 2023 ct labels
+ct_2023 <- read_csv("../data/02_figures.metadata.csv.gz")
+colData(sce) <- colData(sce) %>% as_tibble() %>% 
+  mutate(Barcode2 = paste0(gsub("-\\d+","",Barcode), '-', sample_number)) %>% 
+  left_join(ct_2023,  by = c("Barcode2" = "barcode")) %>% DataFrame()
+
+system('mkdir -p ../data')
+umap <- reducedDim(sce,"UMAP")
+colnames(umap) <- c("UMAP_1","UMAP_2")
+write_csv(bind_cols(colData(sce) %>% as_tibble() %>% dplyr::select(Barcode), umap %>% as_tibble) %>% relocate(Barcode, UMAP_1, UMAP_2),
+          file = '../data/2024_12_05_all_umap.csv')
+write_csv(bind_cols(colData(sce) %>% as_tibble() %>% dplyr::select(Barcode, cluster)),
+          file = '../data/2024_12_05_all_info.csv')
+```
+
+# Accounting
+
+## Cell Counts per Time Point
+Pre and post high mito percentage filtering 
+```{r, fig.width=8}
+
+# grep on the ending digit of the barcode which matches the 10x cellranger naming pattern
+# order of the "sample_info.csv" sheet used in cellranger is how you align
+# obviously alter this
+bind_rows(
+  colData(sce_full) %>% 
+    as_tibble() %>% 
+    mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                              sample_number == 2 ~ 'E11_scRNA_02', 
+                              sample_number == 3 ~ 'E11_scRNA_03',
+                              sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+    group_by(Sample) %>% 
+    summarise(Count = n()) %>% 
+    mutate(QC = 'All Cells'),
+  colData(sce) %>% 
+    as_tibble() %>% 
+    mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                              sample_number == 2 ~ 'E11_scRNA_02', 
+                              sample_number == 3 ~ 'E11_scRNA_03',
+                              sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+    group_by(Sample) %>% 
+    summarise(Count = n()) %>% 
+    mutate(QC = 'High Mito % Filtering')) %>% 
+  ggplot(aes(x=Sample, y = Count, fill = QC)) +
+  geom_bar(stat='identity', position = position_dodge2()) +
+  geom_text(aes(label = Count, y = Count + 200), position = position_dodge(width = 0.9)) + 
+  cowplot::theme_cowplot() +
+  xlab('Sample') +
+  ylab("Cell Count") +
+  coord_flip()
+```
+
+## Distributions
+```{r}
+colData(sce) %>% 
+  as_tibble() %>% 
+  mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                            sample_number == 2 ~ 'E11_scRNA_02', 
+                            sample_number == 3 ~ 'E11_scRNA_03',
+                            sample_number == 4 ~ 'E11_scRNA_04')) %>% ggplot(aes(x=Sample, y =detected)) + geom_violin(draw_quantiles = c(0.5)) + ggtitle("Genes Detected Per Cell") + ylab("Gene Count") + cowplot::theme_cowplot()
+
+colData(sce) %>% 
+  as_tibble() %>% 
+  mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                            sample_number == 2 ~ 'E11_scRNA_02', 
+                            sample_number == 3 ~ 'E11_scRNA_03',
+                            sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+  ggplot(aes(x=Sample, y =subsets_Mito_percent)) + geom_violin(draw_quantiles = c(0.5)) + ggtitle("% Mito Per Cell") + ylab("% Mito") + cowplot::theme_cowplot()
+```
+
+
+## Cell Stage Estimation per Sample
+
+```{r}
+colData(sce) %>% 
+  as_tibble() %>% 
+  mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                            sample_number == 2 ~ 'E11_scRNA_02', 
+                            sample_number == 3 ~ 'E11_scRNA_03',
+                            sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+  group_by(Sample, tricycleStage) %>% 
+  summarise(Count = n()) %>% mutate(Ratio = Count / sum(Count)) %>% 
+  ggplot(aes(x=Sample,y=Ratio, fill = tricycleStage)) + geom_bar(stat = 'identity') +
+  cowplot::theme_cowplot() + 
+  xlab("Sample") +
+  coord_flip()
+```
+
+
+# PCA
+
+## Amount of variance explained by each PC
+```{r}
+reducedDim(sce, 'PCA') %>% attr(., 'percentVar') %>% enframe() %>% 
+  ggplot(aes(x=name,y=value)) + 
+  geom_bar(stat='identity') +
+  cowplot::theme_cowplot() +
+  xlab("PC") + ylab("Percent Variance Explained") +
+  scale_x_continuous(breaks=seq(1, 20, 1))
+```
+
+## Top 20 genes
+Top 10 for each direction of the 20 PC
+
+Useful for quickly seeing what the major axes of variation are coming from. Also if there is a set of genes which you *a prior* know to be useful and you see them in a certain PC, then the *other* genes are of interest. 
+```{r, fig.width=12, fig.height=12}
+bind_rows(reducedDim(sce, 'PCA') %>% attr(., 'rotation') %>% as_tibble(rownames = 'X1') %>% pivot_longer(-X1)  %>% group_by(name) %>% slice_max(order_by = value, n= 10),
+          reducedDim(sce, 'PCA') %>% attr(., 'rotation') %>% as_tibble(rownames = 'X1') %>% pivot_longer(-X1)  %>% group_by(name) %>% slice_min(order_by = value, n= 10)) %>% 
+  mutate(PC = str_extract(name, '\\d+') %>% as.integer()) %>% 
+  left_join(features) %>% 
+  ggplot(aes(x=forcats::fct_reorder(X2, value), y= value)) +
+  geom_point(stat='identity') +
+  cowplot::theme_cowplot() + 
+  coord_flip() +
+  xlab("Gene") +
+  facet_wrap(~PC, ncol =5, scales = 'free')
+```
+
+
+```{r}
+# calculate top markers by cluster
+top_markers_by_cluster <- list()
+for (i in names(markers)){
+  top_markers_by_cluster[[i]] <- markers[[i]] %>% 
+    as_tibble(rownames = 'X1') %>%
+    arrange(-mean.AUC) %>% 
+    head(3) %>% 
+    left_join(features, by ='X1') %>% 
+    relocate(X2) %>% 
+    pull(X2) %>% 
+    paste(collapse = ', ')
+}
+top_markers_by_cluster <- top_markers_by_cluster %>% unlist() %>% enframe()
+names(top_markers_by_cluster) <- c('cluster', 'Top 3 Genes')
+
+#export marker results to excel
+export_markers_by_cluster <- list()
+for (i in names(markers)){
+  export_markers_by_cluster[[i]] <- markers[[i]] %>% as_tibble(rownames = 'X1') %>%left_join(features, by ='X1') %>%
+    relocate(X2) %>% arrange(-mean.logFC.cohen) %>% head(100)
+}
+write_csv(export_markers_by_cluster %>% bind_rows(.id = 'cluster'),
+          file = '../data/2024_12_05_markers_by_cluster.csv')
+
+# top cell cycle stage by cluster
+cluster_cycle <- 
+  colData(sce) %>% 
+  as_tibble() %>% 
+  group_by(cluster, tricycleStage) %>% summarise(Count = n()) %>% 
+  mutate(Ratio = Count / sum(Count),
+         tricycleStage = paste0(tricycleStage, ' (', format(Ratio, digits = 2), ')')) %>% 
+  slice_max(order_by = Ratio, n = 1) %>% dplyr::select(cluster, tricycleStage)
+
+cluster_count <- colData(sce) %>% 
+  as_tibble() %>% 
+  group_by(cluster) %>% summarise(Count = n()) %>% 
+  mutate(cluster = as.integer(cluster))
+
+cluster_doublet <- colData(sce) %>% 
+  as_tibble() %>% 
+  group_by(cluster, solo_doublet) %>% summarise(Count = n()) %>% 
+  mutate(cluster = as.integer(cluster)) %>% 
+  mutate(Doublet_Ratio = Count/sum(Count)) %>% 
+  filter(solo_doublet) %>% 
+  dplyr::select(-Count, -solo_doublet)
+
+cluster_CT  <- colData(sce) %>% 
+  as_tibble() %>% 
+  group_by(cluster, CellType) %>% summarise(Count = n()) %>% mutate(CT_Ratio = Count/sum(Count)) %>% filter(CT_Ratio > 0.4) %>% mutate(cluster = as.integer(cluster)) %>% 
+  dplyr::select(-Count)
+```
+
+# Cluster Characteristics
+
+Note that I have also added a doublet_ratio column. Each individual cell is computationally assessed as to whether it looks like a doublet. The overall percentage is quite high - `r 100 * (solo_scores$solo_doublet %>% sum() / length(solo_scores$solo_doublet))`%. But the good (?) news is that the doublets are very evenly distributed across the samples and clusters (with the exception of cluster 16). Given that the clusters are quite cleanly showing markers for individual cell types, I think we are safe to just ignore the doublet scoring (except for maybe 16 as it is near 100%).
+
+The `CT_Ratio` column is the percentage of the cells within a cluster which match my previous cell type labels (my 2022/2023 work, which I've "deprecated" as I ran the same data through an updated workflow).
+
+```{r}
+top_markers_by_cluster %>% 
+  left_join(
+    colData(sce) %>% 
+      as_tibble() %>% 
+      mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                                sample_number == 2 ~ 'E11_scRNA_02', 
+                                sample_number == 3 ~ 'E11_scRNA_03',
+                                sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+      group_by(cluster, Sample) %>% summarise(Count = n()) %>% 
+      mutate(Ratio = Count / sum(Count)), 
+    by = 'cluster') %>%  
+  mutate(dominantSample = case_when(Ratio > 0.7 ~ Sample)) %>% 
+  ungroup() %>% 
+  group_by(cluster) %>%  
+  slice_max(order_by = Ratio, n = 1) %>% 
+  ungroup() %>% 
+  dplyr::select(-Sample, -Count, -Ratio) %>% 
+  unique() %>% 
+  left_join(cluster_cycle, by = 'cluster') %>% 
+  mutate(cluster = as.integer(cluster)) %>% 
+  arrange(cluster) %>% 
+  left_join(cluster_count, by = 'cluster') %>% 
+  left_join(cluster_doublet, by = 'cluster') %>% 
+  left_join(cluster_CT, by = 'cluster') %>% 
+  relocate(CellType) %>% 
+  DT::datatable()
+
+```
+Notes:
+- very clean CT <-> cluster relationships
+- except for cluster 14, which is a mishmash of a bunch of things
+- and is mostly exclusive to sample 4 (the "overloaded" one)
+- and overexpresses ribo genes, which tend to be associated (in my experience) with lower quality cells
+- so I'm going to remove cluster 14
+- also removing cluster 16 as it is near 100% doublet scoring and is mostly from sample #4
+
+# Distribution of CT calls across each sample
+```{r}
+cbind(reducedDim(sce, 'UMAP'), colData(sce)) %>% as_tibble() %>% 
+  select(-CellType) %>% 
+  left_join(cluster_CT %>% mutate(cluster = as.character(cluster)), by = 'cluster') %>% 
+  filter(!cluster %in% c('14','16')) %>% 
+  mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                            sample_number == 2 ~ 'E11_scRNA_02', 
+                            sample_number == 3 ~ 'E11_scRNA_03',
+                            sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+  group_by(Sample, CellType) %>% 
+  summarise(Count = n()) %>% mutate(Ratio = Count / sum(Count)) %>% 
+  ggplot(aes(x=Sample,y=Ratio, fill = CellType)) + geom_bar(stat = 'identity') +
+  cowplot::theme_cowplot() + 
+  xlab("Sample") +
+  coord_flip() +
+  scale_fill_manual(values= pals::alphabet() %>% unname())
+```
+
+
+# UMAP
+## Color by Cell Type
+Each cluster labelled with the top 3 genes over-expressed (relative to all other cells) in each
+
+```{r, fig.width=4, fig.height=4}
+cbind(reducedDim(sce, 'UMAP'), colData(sce)) %>% as_tibble() %>% 
+  select(-CellType) %>% 
+  left_join(cluster_CT %>% mutate(cluster = as.character(cluster)), by = 'cluster') %>% 
+  filter(!cluster %in% c('14','16')) %>% 
+  ggplot(aes(x=V1, y = V2, color = CellType)) + 
+  geom_point(size = 0.3) + 
+  cowplot::theme_cowplot() +
+  scale_color_manual(values = c(pals::alphabet(), pals::alphabet2(), pals::glasbey()) %>% unname()) +
+  ggrepel::geom_text_repel(data = . %>% 
+                             group_by(CellType) %>% 
+                             summarise(V1 = median(V1),
+                                       V2 = median(V2)), 
+                           aes(x=V1, y = V2, label = CellType),
+                           bg.color = 'gray90') +
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2") 
+
+```
+## Color by CellType and Cluster
+```{r, fig.width=4, fig.height=4}
+cbind(reducedDim(sce, 'UMAP'), colData(sce)) %>% as_tibble() %>% 
+  select(-CellType) %>% 
+  left_join(cluster_CT %>% mutate(cluster = as.character(cluster)), by = 'cluster') %>% 
+  filter(!cluster %in% c('14','16')) %>% 
+  ggplot(aes(x=V1, y = V2, color = cluster)) + 
+  geom_point(size = 0.3) + 
+  cowplot::theme_cowplot() +
+  scale_color_manual(values = c(pals::alphabet(), pals::alphabet2(), pals::glasbey()) %>% unname()) +
+  ggrepel::geom_text_repel(data = . %>% 
+                             group_by(CellType, cluster) %>% 
+                             summarise(V1 = median(V1),
+                                       V2 = median(V2)), 
+                           aes(x=V1, y = V2, label = interaction(CellType,cluster)),
+                           bg.color = 'gray90') +
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2") 
+
+```
+
+
+## Color by CellType, Split by sample
+```{r, fig.width=8, fig.height=8}
+cbind(reducedDim(sce, 'UMAP'), colData(sce)) %>% as_tibble() %>% 
+  select(-CellType) %>% 
+  mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                            sample_number == 2 ~ 'E11_scRNA_02', 
+                            sample_number == 3 ~ 'E11_scRNA_03',
+                            sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+  left_join(cluster_CT %>% mutate(cluster = as.character(cluster)), by = 'cluster') %>% 
+  filter(!cluster %in% c('14','16')) %>% 
+  ggplot(aes(x=V1, y = V2, color = CellType)) + 
+  geom_point(size = 0.3) + 
+  cowplot::theme_cowplot() +
+  scale_color_manual(values = c(pals::alphabet(), pals::alphabet2(), pals::glasbey()) %>% unname()) +
+  ggrepel::geom_text_repel(data = . %>% 
+                             group_by(CellType) %>% 
+                             summarise(V1 = median(V1),
+                                       V2 = median(V2)), 
+                           aes(x=V1, y = V2, label = CellType),
+                           bg.color = 'gray90') +
+  theme(legend.position = "none") +
+  xlab("UMAP 1") + ylab("UMAP 2") +
+  facet_wrap(~Sample)
+```
+
+
+## Colored by imputed cell cycle 
+
+```{r, fig.width=4, fig.height=2}
+
+cbind(reducedDim(sce, 'UMAP'), colData(sce)) %>% as_tibble() %>% 
+  filter(!cluster %in% c('14','16')) %>% 
+  ggplot(aes(x=V1, y = V2)) + 
+  geom_point(aes(color = tricycleStage),size=0.5) + 
+  cowplot::theme_cowplot() +
+  scale_color_manual(values = c(pals::alphabet(), pals::alphabet2(), pals::glasbey()) %>% unname()) +
+  
+  xlab("UMAP 1") + ylab("UMAP 2") 
+
+```
+
+# David picks some genes to plot
+```{r, fig.height=3, fig.width=5}
+conv_table <- AnnotationDbi::select(org.Mm.eg.db::org.Mm.eg.db, 
+                                    keys=gsub('\\.\\d+','',row.names(sce)),
+                                    columns=c("ENSEMBL","SYMBOL","GENENAME", "ENTREZID","GENETYPE"), keytype="ENSEMBL") 
+
+for (gene in c('Mitf','Ntn1','Vim','Nr2f1',"Rmst", 'Zic4','Fzd8','Zic2')){
+  ensembl <- conv_table %>% filter(SYMBOL == gene) %>% pull(1)
+  pdata <- cbind(reducedDim(sce, 'UMAP'),
+                 colData(sce), 
+                 assay(sce, 'logcounts')[ensembl,] %>% enframe()) %>% 
+    as_tibble() 
+  print(pdata %>% 
+          filter(value > 0) %>% 
+          ggplot(aes(x=V1,y=V2, color = value)) +
+          geom_point(size = 1,
+                     data = data.frame(reducedDim(sce, 'UMAP')), 
+                     aes(x = X1, y = X2),color = 'gray') +
+          geom_point(size = 1) +
+          scale_color_viridis_c() +
+          cowplot::theme_cowplot() +
+          xlab("UMAP 1") + ylab("UMAP 2") +
+          labs(color='log(counts)') +
+          ggtitle(gene)
+  )
+  
+  print(pdata %>% filter(!is.na(CellType)) %>% 
+          ggplot(aes(y=CellType,x=value)) + 
+          geom_violin(scale = 'width') + 
+          geom_boxplot(width = 0.2, outlier.shape = NA) + 
+          cowplot::theme_cowplot() + ggtitle(gene) +
+          xlab("log counts"))
+}
+```
+# Build Outputs
+
+1. Diff table (run at the cluster level)
+  - so some celltypes have multiple clusters
+2. Filtered diff table to the highest discriminatory genes
+3. Updated metadata (cell type) calls
+
+```{r}
+new_meta <- cbind(reducedDim(sce, 'UMAP'), 
+                  colData(sce)) %>% as_tibble() %>% 
+    select(-CellType) %>% 
+    mutate(Sample = case_when(sample_number == 1 ~ 'E11_scRNA_01', 
+                              sample_number == 2 ~ 'E11_scRNA_02', 
+                              sample_number == 3 ~ 'E11_scRNA_03',
+                              sample_number == 4 ~ 'E11_scRNA_04')) %>% 
+    left_join(cluster_CT %>% mutate(cluster = as.character(cluster)), by = 'cluster') %>% 
+  mutate(QCpass = case_when(!cluster %in% c('14','16') ~ TRUE,
+                            TRUE ~ FALSE))
+
+diff_table <- map(markers, as_tibble, rownames = 'ENSEMBL') %>% 
+  bind_rows(., .id = 'cluster') %>% 
+  left_join(features %>% select(ENSEMBL = X1, SYMBOL = X2),  by = 'ENSEMBL') %>% 
+  left_join(new_meta %>% select(cluster, CellType) %>% unique(), by = 'cluster')  %>% 
+  relocate(cluster, CellType, SYMBOL) %>% 
+  arrange(-mean.AUC) 
+
+filter_diff_table <- diff_table %>% 
+  filter(!cluster %in% c('14','16')) %>% 
+  filter(rank.logFC.detected == 1)
+
+
+write_csv(new_meta, file = '../data/00_overview_new_meta.csv.gz')
+
+write_csv(diff_table, file = '../data/00_overview_diff_table.csv.gz')
+
+write_csv(filter_diff_table, file = '../data/00_overview_filter_diff_table.csv')
+
+```
+
+# Session Info
+```{r}
+devtools::session_info()
+```
